@@ -1,10 +1,12 @@
 # C++ Concurrent Cache Server
 
-A concurrent caching server built from scratch in C++ using TCP sockets, HTTP, multithreading, and thread-safe data structures.
+A concurrent caching server built from scratch in C++ using TCP sockets, HTTP, epoll, multithreading, and thread-safe data structures.
 
 ## Features
 
 * TCP socket creation, configuration, binding, and listening
+* Nonblocking TCP sockets
+* Linux `epoll`-based event handling
 * Concurrent client handling using a custom thread pool
 * HTTP/1.1 request parsing
 * HTTP request method, path, version, headers, and body parsing
@@ -52,7 +54,7 @@ The `/stats` endpoint reports the number of cache hits and misses.
 
 ## Cache Behavior
 
-Each cache entry has a time-to-live (TTL). Entries that have expired are removed when accessed.
+Each cache entry has a time-to-live (TTL). Expired entries are removed when accessed.
 
 The cache uses **Least Recently Used (LRU)** eviction when it reaches its maximum capacity. Accessing an entry moves it to the front of the LRU list, while the least recently used entry is removed when space is needed.
 
@@ -60,25 +62,23 @@ The cache tracks:
 
 * Cache hits
 * Cache misses
-* Expired entries
-* Evicted entries
 
-## Architecture
+### Request Flow
 
 ```text
 Client
   |
   v
-TCP Connection
+TCP Socket
   |
   v
-Server
+epoll Event Loop
+  |
+  v
+HTTP Request
   |
   v
 Thread Pool
-  |
-  v
-HTTP Request Parser
   |
   v
 Router
@@ -88,9 +88,43 @@ Cache
   |
   v
 HTTP Response
-  |
-  v
-Client
+```
+
+The server uses `epoll` to monitor the listening socket and connected client sockets. Client sockets are nonblocking, allowing the server to handle partial TCP reads without blocking worker threads.
+
+Once a complete HTTP request has been received, it is passed to the thread pool for request processing.
+
+```text
+                         epoll
+                           |
+              +------------+------------+
+              |                         |
+       Listening Socket           Client Sockets
+              |                         |
+           accept()                  EPOLLIN
+                                        |
+                                      recv()
+                                        |
+                              Request complete?
+                                /          \
+                              No            Yes
+                              |              |
+                         Wait for more   Thread Pool
+                           data              |
+                                             v
+                                        HTTP Parser
+                                             |
+                                             v
+                                          Router
+                                             |
+                                             v
+                                           Cache
+                                             |
+                                             v
+                                      HTTP Response
+                                             |
+                                             v
+                                           Client
 ```
 
 ## Running the Server
@@ -120,6 +154,7 @@ Store and retrieve a value:
 
 ```bash
 curl -X PUT http://localhost:8080/cache/name -d "Annalee"
+
 curl http://localhost:8080/cache/name
 ```
 
@@ -135,7 +170,7 @@ The server performs a graceful shutdown when interrupted.
 
 The project uses GoogleTest for automated unit and integration testing.
 
-> Note: The server must be running on port `8080` before running the integration tests. Start it in a separate terminal with `./build/server`.
+> **Note:** The server must be running on port `8080` before running the integration tests. Start it in a separate terminal with `./build/server`.
 
 Build and run the tests with:
 
@@ -145,7 +180,7 @@ cd build
 ctest --output-on-failure
 ```
 
-The test suite currently contains **51 tests** covering:
+The test suite currently contains **54 tests** covering:
 
 ### Cache
 
@@ -203,14 +238,17 @@ The test suite currently contains **51 tests** covering:
 * Malformed requests
 * Empty values
 * Updating existing values
+* Partial TCP requests
+* Multiple concurrent clients
+* Idle clients not blocking active requests
 
 ## Future Improvements
 
 * Configurable TTL through HTTP requests
 * More robust HTTP validation and error handling
+* `EPOLLOUT`-based response handling for fully event-driven socket writes
 * Performance benchmarking
 * Benchmark different thread-pool sizes
 * Measure request throughput and latency
-* More robust socket send handling
 * Additional cache performance metrics
 * Document benchmark and performance results

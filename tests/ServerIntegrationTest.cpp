@@ -4,7 +4,11 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+#include <chrono>
+#include <cstring>
 #include <string>
+#include <thread>
+#include <vector>
 
 std::string sendRequest(const std::string& request) {
     int socketFd = socket(AF_INET, SOCK_STREAM, 0);
@@ -63,6 +67,41 @@ std::string sendRequest(const std::string& request) {
     close(socketFd);
 
     return response;
+}
+
+// Connect to the running server and return the socket.
+int connectToServer() {
+    int socketFd =
+        socket(AF_INET, SOCK_STREAM, 0);
+
+    EXPECT_NE(socketFd, -1);
+
+    sockaddr_in serverAddress{};
+
+    serverAddress.sin_family =
+        AF_INET;
+
+    serverAddress.sin_port =
+        htons(8080);
+
+    inet_pton(
+        AF_INET,
+        "127.0.0.1",
+        &serverAddress.sin_addr
+    );
+
+    int result =
+        connect(
+            socketFd,
+            reinterpret_cast<sockaddr*>(
+                &serverAddress
+            ),
+            sizeof(serverAddress)
+        );
+
+    EXPECT_EQ(result, 0);
+
+    return socketFd;
 }
 
 TEST(ServerIntegrationTest, PutThenGet) {
@@ -382,4 +421,248 @@ TEST(ServerIntegrationTest, UpdatesExistingValue) {
         getResponse.find("Old"),
         std::string::npos
     );
+}
+
+// Receive the complete response from the server.
+std::string receiveResponse(int socketFd) {
+
+    char buffer[4096];
+
+    std::string response;
+
+    while (true) {
+
+        ssize_t bytesReceived =
+            recv(
+                socketFd,
+                buffer,
+                sizeof(buffer),
+                0
+            );
+
+        if (bytesReceived <= 0) {
+            break;
+        }
+
+        response.append(
+            buffer,
+            bytesReceived
+        );
+    }
+
+    return response;
+}
+
+
+// -------------------------------------------------------------
+// Test that a request can arrive in multiple pieces.
+//
+// This is important for the epoll design because TCP does not
+// guarantee that one send() on the client corresponds to one
+// recv() on the server.
+// -------------------------------------------------------------
+
+TEST(ServerIntegrationTest, HandlesPartialRequest) {
+
+    int socketFd =
+        connectToServer();
+
+
+    // Send only part of the HTTP request.
+    std::string part1 =
+        "PUT /cache/partial HTTP/1.1\r\n";
+
+    send(
+        socketFd,
+        part1.data(),
+        part1.size(),
+        0
+    );
+
+
+    // Give the server a chance to process the first piece.
+    std::this_thread::sleep_for(
+        std::chrono::milliseconds(100)
+    );
+
+
+    // Send the rest of the headers.
+    std::string part2 =
+        "Host: localhost\r\n"
+        "Content-Length: 5\r\n"
+        "\r\n";
+
+    send(
+        socketFd,
+        part2.data(),
+        part2.size(),
+        0
+    );
+
+
+    // Send the body separately.
+    std::this_thread::sleep_for(
+        std::chrono::milliseconds(100)
+    );
+
+    std::string part3 =
+        "hello";
+
+    send(
+        socketFd,
+        part3.data(),
+        part3.size(),
+        0
+    );
+
+
+    std::string response =
+        receiveResponse(socketFd);
+
+
+    EXPECT_NE(
+        response.find("200"),
+        std::string::npos
+    );
+
+
+    close(socketFd);
+}
+
+
+// -------------------------------------------------------------
+// Test multiple clients connecting and sending requests at
+// approximately the same time.
+//
+// This verifies that the server can monitor multiple client
+// sockets and process their requests concurrently.
+// -------------------------------------------------------------
+
+TEST(ServerIntegrationTest, HandlesMultipleConcurrentClients) {
+
+    constexpr int CLIENT_COUNT = 5;
+
+    std::vector<std::thread> clients;
+
+    std::vector<std::string> responses(
+        CLIENT_COUNT
+    );
+
+
+    for (int i = 0; i < CLIENT_COUNT; i++) {
+
+        clients.emplace_back(
+            [i, &responses]() {
+
+                int socketFd =
+                    connectToServer();
+
+
+                std::string request =
+                    "PUT /cache/client" +
+                    std::to_string(i) +
+                    " HTTP/1.1\r\n"
+                    "Host: localhost\r\n"
+                    "Content-Length: 5\r\n"
+                    "\r\n"
+                    "hello";
+
+
+                send(
+                    socketFd,
+                    request.data(),
+                    request.size(),
+                    0
+                );
+
+
+                responses[i] =
+                    receiveResponse(socketFd);
+
+
+                close(socketFd);
+            }
+        );
+    }
+
+
+    // Wait for every client thread to finish.
+    for (auto& client : clients) {
+        client.join();
+    }
+
+
+    // Every client should have received a successful response.
+    for (const auto& response : responses) {
+
+        EXPECT_NE(
+            response.find("200"),
+            std::string::npos
+        );
+    }
+}
+
+
+// -------------------------------------------------------------
+// Test that an idle client does not prevent another client
+// from being handled.
+//
+// The first client connects but sends no data.
+//
+// The second client then connects and sends a complete request.
+//
+// With the epoll architecture, the server should continue
+// monitoring both sockets rather than having a worker thread
+// blocked waiting for the first client.
+// -------------------------------------------------------------
+
+TEST(ServerIntegrationTest, IdleClientDoesNotBlockServer) {
+
+    // Connect the first client.
+    int idleSocket =
+        connectToServer();
+
+
+    // Do not send anything from this client.
+    //
+    // The server should simply wait for an EPOLLIN event
+    // on this socket.
+    std::this_thread::sleep_for(
+        std::chrono::milliseconds(100)
+    );
+
+
+    // Connect a second client.
+    int activeSocket =
+        connectToServer();
+
+
+    std::string request =
+        "GET /hello HTTP/1.1\r\n"
+        "Host: localhost\r\n"
+        "\r\n";
+
+
+    send(
+        activeSocket,
+        request.data(),
+        request.size(),
+        0
+    );
+
+
+    // The active client should still receive a response even
+    // though the first client has sent nothing.
+    std::string response =
+        receiveResponse(activeSocket);
+
+
+    EXPECT_NE(
+        response.find("200"),
+        std::string::npos
+    );
+
+
+    close(activeSocket);
+    close(idleSocket);
 }
