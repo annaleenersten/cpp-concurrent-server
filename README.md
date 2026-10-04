@@ -151,8 +151,6 @@ The current test suite contains **54 tests** covering:
 * Idle client connections
 * End-to-end HTTP operations
 
-The integration tests require the server to be running on port `8080`.
-
 ## Future Improvements
 
 * Configurable TTL through HTTP requests
