@@ -63,7 +63,7 @@ The cache tracks:
 * Cache hits
 * Cache misses
 
-### Request Flow
+## Request Flow
 
 ```text
 Client
