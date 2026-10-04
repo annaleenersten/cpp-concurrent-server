@@ -1,17 +1,17 @@
 # C++ Concurrent Cache Server
 
-A concurrent caching server built from scratch in C++ using TCP sockets, HTTP, epoll, multithreading, and thread-safe data structures.
+A concurrent caching server built from scratch in C++ using TCP sockets, HTTP/1.1, Linux `epoll`, multithreading, and thread-safe data structures.
 
 ## Features
 
 * TCP socket creation, configuration, binding, and listening
 * Nonblocking TCP sockets
-* Linux `epoll`-based event handling
+* Linux epoll-based event handling
 * Concurrent client handling using a custom thread pool
 * HTTP/1.1 request parsing
 * HTTP request method, path, version, headers, and body parsing
 * HTTP request validation
-* HTTP error responses (`400`, `404`, `405`)
+* HTTP error responses (400, 404, 405)
 * Request routing
 * Thread-safe in-memory caching
 * PUT, GET, and DELETE operations
@@ -19,10 +19,53 @@ A concurrent caching server built from scratch in C++ using TCP sockets, HTTP, e
 * LRU cache eviction
 * Configurable cache capacity
 * Cache hit and miss statistics
-* `/stats` endpoint for cache statistics
+* /stats endpoint for cache statistics
 * Handling of partial TCP reads and larger request bodies
 * Graceful server shutdown
 * Unit and integration testing with GoogleTest
+
+## Architecture
+
+```text id="c8f1wk"
+Client
+  |
+  v
+TCP Connection
+  |
+  v
+Server
+  |
+  v
+epoll
+  |
+  +------------------+
+  |                  |
+  v                  v
+accept()           recv()
+                     |
+                     v
+              Complete Request
+                     |
+                     v
+                Thread Pool
+                     |
+                     v
+                HTTP Parser
+                     |
+                     v
+                  Router
+                     |
+                     v
+                  Cache
+                     |
+                     v
+              HTTP Response
+                     |
+                     v
+                  Client
+```
+
+The server uses `epoll` to monitor the listening socket and connected clients without blocking worker threads on network I/O. Partial requests are stored until the complete HTTP request has been received, then the request is passed to the thread pool for processing.
 
 ## API
 
@@ -50,86 +93,17 @@ curl -X DELETE http://localhost:8080/cache/name
 curl http://localhost:8080/stats
 ```
 
-The `/stats` endpoint reports the number of cache hits and misses.
-
 ## Cache Behavior
 
-Each cache entry has a time-to-live (TTL). Expired entries are removed when accessed.
+Each entry has a configurable cache capacity and a time-to-live (TTL).
 
-The cache uses **Least Recently Used (LRU)** eviction when it reaches its maximum capacity. Accessing an entry moves it to the front of the LRU list, while the least recently used entry is removed when space is needed.
+The cache uses **Least Recently Used (LRU)** eviction when its maximum capacity is reached. Accessing an entry moves it to the front of the LRU list, while the least recently used entry is removed when space is needed.
 
-The cache tracks:
-
-* Cache hits
-* Cache misses
-
-## Request Flow
-
-```text
-Client
-  |
-  v
-TCP Socket
-  |
-  v
-epoll Event Loop
-  |
-  v
-HTTP Request
-  |
-  v
-Thread Pool
-  |
-  v
-Router
-  |
-  v
-Cache
-  |
-  v
-HTTP Response
-```
-
-The server uses `epoll` to monitor the listening socket and connected client sockets. Client sockets are nonblocking, allowing the server to handle partial TCP reads without blocking worker threads.
-
-Once a complete HTTP request has been received, it is passed to the thread pool for request processing.
-
-```text
-                         epoll
-                           |
-              +------------+------------+
-              |                         |
-       Listening Socket           Client Sockets
-              |                         |
-           accept()                  EPOLLIN
-                                        |
-                                      recv()
-                                        |
-                              Request complete?
-                                /          \
-                              No            Yes
-                              |              |
-                         Wait for more   Thread Pool
-                           data              |
-                                             v
-                                        HTTP Parser
-                                             |
-                                             v
-                                          Router
-                                             |
-                                             v
-                                           Cache
-                                             |
-                                             v
-                                      HTTP Response
-                                             |
-                                             v
-                                           Client
-```
+The cache also tracks cache hits and misses.
 
 ## Running the Server
 
-Build the project from the project root:
+Build the project:
 
 ```bash
 cmake -S . -B build
@@ -144,111 +118,45 @@ Start the server:
 
 The server listens on port `8080`.
 
-In another terminal, send requests using `curl`:
+Test the server with:
 
 ```bash
 curl http://localhost:8080/hello
 ```
 
-Store and retrieve a value:
-
-```bash
-curl -X PUT http://localhost:8080/cache/name -d "Annalee"
-
-curl http://localhost:8080/cache/name
-```
-
-Stop the server with:
-
-```text
-Ctrl+C
-```
-
-The server performs a graceful shutdown when interrupted.
+Stop the server with `Ctrl+C`.
 
 ## Testing
 
-The project uses GoogleTest for automated unit and integration testing.
+The project uses GoogleTest for unit and integration testing.
 
-> **Note:** The server must be running on port `8080` before running the integration tests. Start it in a separate terminal with `./build/server`.
+> Note: The server must be running on port 8080 before running the integration tests. Start it in a separate terminal with ./build/server.
 
-Build and run the tests with:
+Run the tests from the build directory:
 
 ```bash
-cmake --build build
 cd build
 ctest --output-on-failure
 ```
 
-The test suite currently contains **54 tests** covering:
+The current test suite contains **54 tests** covering:
 
-### Cache
-
-* Storage and retrieval
-* Updating existing values
-* Missing keys
-* Deletion
-* TTL expiration
-* LRU eviction
-* LRU order updates
-* Cache hit/miss tracking
-
-### HTTP Request Parsing
-
-* Request line parsing
-* HTTP headers
-* Request bodies
-* Content-Length
-* Missing headers
-* Malformed requests
-* Unsupported HTTP versions
-
-### HTTP Responses
-
-* Status information
-* Not found responses
-* Empty response bodies
-
-### Routing
-
-* Root, hello, and about routes
-* Unknown routes
-* PUT, GET, and DELETE operations
-* Missing cache keys
-* Invalid requests
-* Unsupported methods
-* Cache statistics
-
-### Thread Pool
-
-* Task execution
-* Multiple tasks
-
-### Integration
-
-* PUT → GET
-* Missing keys
-* DELETE → GET
-* Unsupported methods
-* Large request bodies
-* Multiple client connections
-* Empty cache keys
-* Unknown routes
-* Invalid HTTP versions
-* Malformed requests
-* Empty values
-* Updating existing values
+* Cache behavior and eviction
+* HTTP request parsing and validation
+* HTTP responses
+* Routing
+* Thread pool behavior
 * Partial TCP requests
 * Multiple concurrent clients
-* Idle clients not blocking active requests
+* Idle client connections
+* End-to-end HTTP operations
+
+The integration tests require the server to be running on port `8080`.
 
 ## Future Improvements
 
 * Configurable TTL through HTTP requests
 * More robust HTTP validation and error handling
-* `EPOLLOUT`-based response handling for fully event-driven socket writes
+* `EPOLLOUT`-based response handling
 * Performance benchmarking
-* Benchmark different thread-pool sizes
-* Measure request throughput and latency
 * Additional cache performance metrics
-* Document benchmark and performance results
